@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 
-API_BASE = "http://localhost:5000"
+API_BASE = "https://YOUR-RENDER-URL"
 
 # Page configuration
 st.set_page_config(
