@@ -1,0 +1,3 @@
+dialogue_id,turn_index,speaker,utterance,original_prob,intervention_feature,intervention_direction,original_feature_value,prob_after_intervention,prob_reduction
+3116,5,師兄,摸錢包唄！,0.5084917796156299,speakers_in_dialogue,increase,4,0.4163892335289486,0.09210254608668128
+2528,4,連國,我……我是A型血。,0.5123933053768781,speakers_in_dialogue,increase,3,0.47993137022506965,0.03246193515180845
