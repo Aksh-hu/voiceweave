@@ -5,50 +5,41 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 
+# ===================== MODEL LOADING (LAZY) =====================
 
-# ---------- MODEL LOADING (LOCAL, NO FLASK) ----------
-
-
-@st.cache_resource(show_spinner=True)
+@st.cache_resource(show_spinner=False)
 def load_models():
     """
     Load the trained Random Forest model and scaler from the models/ folder.
     Works both locally and on Streamlit Cloud.
     """
-    import os
-    
-    # Try multiple path strategies
-    possible_paths = [
-        os.path.join("models", "rf_suppression_model.pkl"),  # relative to cwd
-        os.path.join(os.path.dirname(__file__), "models", "rf_suppression_model.pkl"),  # relative to script
-        "/mount/src/voiceweave/models/rf_suppression_model.pkl",  # Streamlit Cloud path
-    ]
-    
-    rf_path = None
-    for path in possible_paths:
-        if os.path.exists(path):
-            rf_path = path
-            break
-    
-    if rf_path is None:
-        raise FileNotFoundError(
-            f"Could not find rf_suppression_model.pkl. Tried: {possible_paths}"
-        )
-    
-    scaler_path = os.path.join(os.path.dirname(rf_path), "scaler.pkl")
-    
-    with open(rf_path, "rb") as f:
-        rf_model = pickle.load(f)
-    with open(scaler_path, "rb") as f:
-        scaler = pickle.load(f)
-
-    return rf_model, scaler
+    try:
+        # Try local path first
+        if os.path.exists("models/rf_suppression_model.pkl"):
+            rf_path = "models/rf_suppression_model.pkl"
+            scaler_path = "models/scaler.pkl"
+        # Try relative to script
+        elif os.path.exists(os.path.join(os.path.dirname(__file__), "models", "rf_suppression_model.pkl")):
+            rf_path = os.path.join(os.path.dirname(__file__), "models", "rf_suppression_model.pkl")
+            scaler_path = os.path.join(os.path.dirname(__file__), "models", "scaler.pkl")
+        # Try Streamlit Cloud path
+        elif os.path.exists("/mount/src/voiceweave/models/rf_suppression_model.pkl"):
+            rf_path = "/mount/src/voiceweave/models/rf_suppression_model.pkl"
+            scaler_path = "/mount/src/voiceweave/models/scaler.pkl"
+        else:
+            return None, None, "Models not found in any expected location."
+        
+        with open(rf_path, "rb") as f:
+            rf_model = pickle.load(f)
+        with open(scaler_path, "rb") as f:
+            scaler = pickle.load(f)
+        
+        return rf_model, scaler, None
+    except Exception as e:
+        return None, None, f"Error loading models: {str(e)}"
 
 
-# LOAD MODELS HERE
-rf_model, scaler = load_models()
-
-# ---------- STREAMLIT PAGE CONFIG / STYLES ----------
+# ===================== PAGE CONFIG & STYLES =====================
 
 st.set_page_config(
     page_title="VoiceWeave – Dialogue Suppression Explorer",
@@ -130,9 +121,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-
-# ---------- SHARED LAYOUT HELPERS ----------
-
+# ===================== SHARED LAYOUT HELPERS =====================
 
 def layout_header():
     c1, c2 = st.columns([4, 2])
@@ -144,11 +133,10 @@ def layout_header():
         )
     with c2:
         st.markdown(
-            '<div style="text-align:right;"><span class="metric-label">'
+            '<div style="text-align:right;"><span style="font-size:0.8rem;color:#6b7280;">'
             "Models loaded inside app</span></div>",
             unsafe_allow_html=True,
         )
-        st.write("")
 
 
 def layout_metrics(summary):
@@ -186,7 +174,7 @@ def layout_metrics(summary):
     with c4:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
         st.markdown(
-            '<div class="metric-label">High‑risk turns</div>', unsafe_allow_html=True
+            '<div class="metric-label">High-risk turns</div>', unsafe_allow_html=True
         )
         st.markdown(
             f'<div class="metric-value">{summary.get("high_risk_count", 0)}</div>',
@@ -258,9 +246,7 @@ def render_turn_table(turns):
         )
     st.markdown("</div>", unsafe_allow_html=True)
 
-
-# ---------- CORE ANALYSIS LOGIC (NO API) ----------
-
+# ===================== ANALYSIS LOGIC =====================
 
 def parse_transcript(text: str):
     lines = [l.strip() for l in text.split("\n") if l.strip()]
@@ -295,7 +281,7 @@ def compute_features(df: pd.DataFrame):
     return X
 
 
-def run_model_on_transcript(text: str):
+def run_model_on_transcript(text: str, rf_model, scaler):
     df = parse_transcript(text)
     if df is None:
         return None, "Need at least 2 turns in format Speaker|text."
@@ -349,9 +335,7 @@ def run_model_on_transcript(text: str):
 
     return {"summary": summary, "turns": turns, "recommendations": recs}, None
 
-
-# ---------- PAGES ----------
-
+# ===================== PAGES =====================
 
 def page_about():
     st.header("What this prototype does")
@@ -365,16 +349,10 @@ def page_about():
     st.write(
         """
         The current version focuses on structural cues in the transcript: who speaks, how often they appear, 
-        and how long their turns are. It does not yet use word meaning or audio tone. The goal is to make 
-        basic participation patterns visible and inspectable before adding more complex signals.
+        and how long their turns are. It does not yet use word meaning or audio tone.
         """
     )
     st.header("How the analysis works")
-    st.write(
-        """
-        For each utterance in a transcript, the app computes four structural features:
-        """
-    )
     st.markdown(
         """
         - Utterance length in characters  
@@ -385,17 +363,7 @@ def page_about():
     )
     st.write(
         """
-        These features are standardized and fed into a Random Forest classifier trained on the labeled dataset. 
-        The model outputs a suppression probability for each turn, which is then summarized as metrics, a 
-        suppression heatmap, and per‑turn recommendations.
-        """
-    )
-    st.write(
-        """
-        During model development, mechanistic interpretability tools such as feature importance analysis and 
-        turn‑level inspection were used offline to understand how these structural features influence predictions. 
-        This helps reveal patterns like: conversations where one speaker holds many long turns tend to generate 
-        higher suppression scores for shorter, infrequent contributions from others.
+        These features are standardized and passed into a Random Forest classifier trained on labeled data.
         """
     )
 
@@ -403,48 +371,20 @@ def page_about():
 def page_how_to_use():
     st.header("How to use this interface")
     st.subheader("Input format")
+    st.write("`SpeakerName|utterance text`")
     st.write(
         """
-        Paste a transcript where each line follows:
-
-        `SpeakerName|utterance text`
-        """
-    )
-    st.write(
-        """
-        For example:
-
-        `Alex|I think the budget is tight and we should start small.`  
-        `Priya|I am worried that some neighborhoods will be left out.`  
-        `Facilitator|Who has not had a chance to speak yet?`
+        Example:
+        - `Alex|I think the budget is tight.`  
+        - `Priya|I disagree.`  
+        - `Facilitator|Who else has thoughts?`
         """
     )
     st.subheader("What the model analyzes")
     st.markdown(
         """
-        - It uses only the structure of the transcript: length of each turn, number of speakers, and how often each speaker appears.  
-        - It does not yet use word meaning, topics, or sentiment.  
-        - It does not yet use audio information such as tone, pitch, or interruptions.  
-        """
-    )
-    st.write(
-        """
-        Even with these constraints, structural patterns already capture useful signals about participation balance. 
-        The model uses these patterns, learned from the training corpus, to estimate suppression risk per turn.
-        """
-    )
-    st.subheader("Reading the output")
-    st.markdown(
-        """
-        - Metric cards summarize the size and diversity of the dialogue and overall risk.  
-        - The heatmap shows suppression risk by turn index, highlighting where risk spikes.  
-        - Recommendations point to specific turns where inviting a speaker back in may be helpful.  
-        - The turn‑by‑turn view lets you read each utterance with its risk label and risk level.
-        """
-    )
-    st.write(
-        """
-        These outputs are designed as prompts for reflection and facilitation, not as definitive labels about people or groups.
+        - Structure only: turn length, speaker frequency, dialogue diversity  
+        - Not yet: word meaning, tone, or audio  
         """
     )
 
@@ -477,7 +417,7 @@ def page_analyze():
         st.session_state["transcript"] = example
 
     st.text_area(
-        "Transcript (one line per turn, format: Speaker|text)",
+        "Transcript",
         value=st.session_state["transcript"],
         key="transcript",
         height=260,
@@ -488,10 +428,16 @@ def page_analyze():
     if analyze_clicked:
         transcript = st.session_state["transcript"].strip()
         if not transcript:
-            st.warning("Please paste a transcript or load the example before analyzing.")
+            st.warning("Please paste a transcript or load the example.")
             return
 
-        result, error = run_model_on_transcript(transcript)
+        # Load models only when needed
+        rf_model, scaler, error = load_models()
+        if error:
+            st.error(f"Cannot load models: {error}")
+            return
+
+        result, error = run_model_on_transcript(transcript, rf_model, scaler)
         if error is not None:
             st.error(error)
             return
@@ -506,8 +452,6 @@ def page_analyze():
         fig = build_heatmap(turns)
         if fig is not None:
             st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No turns available for visualization.")
 
         st.subheader("Facilitation recommendations")
         if recs:
@@ -520,9 +464,7 @@ def page_analyze():
                     <div class="turn-row">
                         <div class="turn-speaker">
                             Turn {r_item['turn_index'] + 1} · {r_item['speaker']}
-                            <span style="color:#6b7280;font-weight:400;">
-                                · {risk_label} risk · {prob_pct}%
-                            </span>
+                            <span style="color:#6b7280;font-weight:400;"> · {risk_label} · {prob_pct}%</span>
                         </div>
                         <div class="turn-text">{r_item['suggestion']}</div>
                     </div>
@@ -531,77 +473,36 @@ def page_analyze():
                 )
             st.markdown("</div>", unsafe_allow_html=True)
         else:
-            st.info("No turns crossed the high‑risk threshold in this transcript.")
+            st.info("No high-risk turns detected.")
 
-        st.subheader("Turn‑by‑turn view")
+        st.subheader("Turn-by-turn view")
         render_turn_table(turns)
     else:
-        st.info("Load the example or paste a transcript, then click "Analyze transcript".")
-        st.write("Once you analyze, results will appear here: metrics, heatmap, and turn‑by‑turn view.")
+        st.info("Load the example or paste a transcript, then click Analyze.")
 
 
 def page_research():
-    st.header("End‑to‑end pipeline")
-
-    st.write(
-        """
-        The current prototype follows this pipeline:
-        """
-    )
+    st.header("End-to-end pipeline")
     st.markdown(
         """
-        1. **Data assembly**  
-           - Labeled dialogue corpus with approximately 38,000 utterances.  
-           - Each turn includes dialogue id, speaker id, turn index, utterance text, emotion, and a label: suppressed or amplified.  
-
-        2. **Feature engineering (training)**  
-           - For each turn, compute:  
-             - Utterance length in characters  
-             - Word count  
-             - Number of distinct speakers in the dialogue  
-             - Number of turns contributed by this speaker in the dialogue  
-           - Standardize these four features with a `StandardScaler`.  
-
-        3. **Model training**  
-           - Train a Random Forest classifier on the four standardized features to predict suppressed vs amplified.  
-           - Evaluate on a held‑out test split with metrics such as accuracy and AUC.  
-           - Use feature importance and turn‑level inspection offline to understand which structural patterns drive predictions.  
-
-        4. **Deployment in this app**  
-           - The trained Random Forest and scaler are loaded directly inside this Streamlit app.  
-           - For any new transcript, the app recomputes the same four features, applies the saved scaler, and runs the trained model.  
-           - The app then visualizes per‑turn suppression probabilities plus summary statistics and recommendations.  
+        1. **Data**: ~38,000 labeled dialogue turns  
+        2. **Features**: Length, word count, speaker diversity, turn frequency  
+        3. **Model**: Random Forest on standardized features  
+        4. **App**: Loads model, analyzes new transcripts in real time  
         """
     )
-
-    st.subheader("What is included now vs. future work")
+    st.subheader("Current vs. Future")
     st.markdown(
         """
-        | Aspect             | Current prototype                                              | Planned extensions                                      |
-        |--------------------|----------------------------------------------------------------|---------------------------------------------------------|
-        | Data               | Labeled transcript corpus (~38k turns)                        | Additional datasets and domains                         |
-        | Features           | Length, word count, speaker diversity, speaker turn count      | Semantic and prosodic descriptors                       |
-        | Model              | Random Forest classifier                                      | Alternative models and baselines                        |
-        | Interpretability   | Structural feature importance and turn‑level inspection        | Deeper analysis of feature interactions and dynamics    |
-        | Interface          | Transcript analysis, heatmap, recommendations, turn table      | Multi‑session views, comparison between conversations   |
-        | Deployment         | Streamlit app with embedded model                             | Integration with live transcription for facilitation    |
+        | Now | Next |
+        |-----|------|
+        | Structural features | Semantic & prosodic |
+        | Transcript analysis | Live transcription |
+        | Single turn labels | Session-level insights |
         """
     )
 
-    st.subheader("Live facilitation vision")
-    st.write(
-        """
-        The same analysis used here for static transcripts can be connected to a streaming transcription service. 
-        In that setting, each new utterance would be processed as it arrives, structural features would be updated 
-        incrementally, and suppression risk would be computed in near real time. A facilitator could then use a 
-        live dashboard to notice which speakers or turns are consistently flagged as high risk and adjust their 
-        interventions during the conversation, rather than only after it ends.
-        """
-    )
-
-
-# ---------- MAIN ----------
-
+# ===================== MAIN =====================
 
 def main():
     layout_header()
@@ -611,7 +512,7 @@ def main():
         "About": page_about,
         "How to use": page_how_to_use,
         "Analyze": page_analyze,
-        "Research background": page_research,
+        "Research": page_research,
     }
     choice = st.sidebar.radio("Navigation", list(pages.keys()))
     pages[choice]()
