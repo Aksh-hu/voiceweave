@@ -1,18 +1,46 @@
-import requests
-import streamlit as st
-import pandas as pd
+import os
+import pickle
 import numpy as np
+import pandas as pd
+import streamlit as st
 import plotly.express as px
 
-API_BASE = "https://YOUR-RENDER-URL"
+# ---------- MODEL LOADING (LOCAL, NO FLASK) ----------
 
-# Page configuration
+@st.cache_resource(show_spinner=True)
+def load_models():
+    """
+    Load the trained Random Forest model and scaler from the models/ folder.
+    Assumes the repository structure:
+    D:/VoiceWeave_MPDD/
+      ├── frontend.py
+      ├── models/
+      │   ├── rf_suppression_model.pkl
+      │   └── scaler.pkl
+    """
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    models_dir = os.path.join(base_dir, "models")
+
+    rf_path = os.path.join(models_dir, "rf_suppression_model.pkl")
+    scaler_path = os.path.join(models_dir, "scaler.pkl")
+
+    with open(rf_path, "rb") as f:
+        rf_model = pickle.load(f)
+    with open(scaler_path, "rb") as f:
+        scaler = pickle.load(f)
+
+    return rf_model, scaler
+
+
+rf_model, scaler = load_models()
+
+# ---------- STREAMLIT PAGE CONFIG / STYLES ----------
+
 st.set_page_config(
     page_title="VoiceWeave – Dialogue Suppression Explorer",
     layout="wide",
 )
 
-# Minimalist CSS: dark text, light blue actions
 st.markdown(
     """
     <style>
@@ -83,39 +111,12 @@ st.markdown(
         color: #c05621;
         font-weight: 600;
     }
-    .backend-pill {
-        font-size: 0.75rem;
-        padding: 0.15rem 0.5rem;
-        border-radius: 999px;
-        border: 1px solid #d1d5db;
-        color: #374151;
-        background-color: #f9fafb;
-    }
-    .backend-pill-ok {
-        border-color: #16a34a;
-        color: #166534;
-        background-color: #ecfdf3;
-    }
-    .backend-pill-bad {
-        border-color: #b91c1c;
-        color: #7f1d1d;
-        background-color: #fef2f2;
-    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-
-def check_backend():
-    try:
-        r = requests.get(f"{API_BASE}/health", timeout=2)
-        if r.status_code == 200:
-            data = r.json()
-            return bool(data.get("rf_ready") and data.get("scaler_ready"))
-        return False
-    except Exception:
-        return False
+# ---------- SHARED LAYOUT HELPERS ----------
 
 
 def layout_header():
@@ -127,12 +128,9 @@ def layout_header():
             "are at risk of being suppressed."
         )
     with c2:
-        backend_ok = check_backend()
-        pill_class = "backend-pill-ok" if backend_ok else "backend-pill-bad"
-        status_text = "Backend online" if backend_ok else "Backend offline"
         st.markdown(
-            f'<div style="text-align:right;"><span class="backend-pill {pill_class}">'
-            f"{status_text}</span></div>",
+            '<div style="text-align:right;"><span class="metric-label">'
+            "Models loaded inside app</span></div>",
             unsafe_allow_html=True,
         )
         st.write("")
@@ -245,6 +243,98 @@ def render_turn_table(turns):
         )
     st.markdown("</div>", unsafe_allow_html=True)
 
+# ---------- CORE ANALYSIS LOGIC (NO API) ----------
+
+
+def parse_transcript(text: str):
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    rows = []
+    for line in lines:
+        if "|" not in line:
+            continue
+        speaker, utt = line.split("|", 1)
+        speaker = speaker.strip()
+        utt = utt.strip()
+        if speaker and utt:
+            rows.append({"speaker": speaker, "utterance": utt})
+    if len(rows) < 2:
+        return None
+    df = pd.DataFrame(rows)
+    df["dialogue_id"] = 0
+    return df
+
+
+def compute_features(df: pd.DataFrame):
+    df["utterance_len"] = df["utterance"].astype(str).str.len()
+    df["word_count"] = df["utterance"].astype(str).str.split().str.len()
+    df["speakers_in_dialogue"] = df["speaker"].nunique()
+    df["speaker_turn_count"] = df.groupby("speaker")["utterance"].transform("count")
+    feature_cols = [
+        "utterance_len",
+        "word_count",
+        "speakers_in_dialogue",
+        "speaker_turn_count",
+    ]
+    X = df[feature_cols].fillna(0).astype(float).values
+    return X
+
+
+def run_model_on_transcript(text: str):
+    df = parse_transcript(text)
+    if df is None:
+        return None, "Need at least 2 turns in format Speaker|text."
+
+    X = compute_features(df)
+
+    if X.shape[1] != rf_model.n_features_in_ or X.shape[1] != scaler.n_features_in_:
+        return None, (
+            f"Feature mismatch: X has {X.shape[1]}, "
+            f"model expects {rf_model.n_features_in_}, "
+            f"scaler expects {scaler.n_features_in_}."
+        )
+
+    X_scaled = scaler.transform(X)
+    probs = rf_model.predict_proba(X_scaled)[:, 1]
+
+    turns = []
+    recs = []
+    for i, row in df.reset_index(drop=True).iterrows():
+        p = float(probs[i])
+        status = "suppressed" if p > 0.5 else "amplified"
+        turns.append(
+            {
+                "turn_index": int(i),
+                "speaker": row["speaker"],
+                "text": row["utterance"][:200],
+                "suppression_prob": p,
+                "status": status,
+            }
+        )
+        if p > 0.65:
+            recs.append(
+                {
+                    "turn_index": int(i),
+                    "speaker": row["speaker"],
+                    "risk": "high" if p > 0.80 else "moderate",
+                    "probability": p,
+                    "suggestion": (
+                        f"Invite {row['speaker']} to expand on this turn; "
+                        "their contribution is at elevated risk of being suppressed."
+                    ),
+                }
+            )
+
+    summary = {
+        "total_turns": int(len(df)),
+        "unique_speakers": int(df["speaker"].nunique()),
+        "avg_risk": float(np.mean(probs)),
+        "high_risk_count": int(sum(p > 0.65 for p in probs)),
+    }
+
+    return {"summary": summary, "turns": turns, "recommendations": recs}, None
+
+# ---------- PAGES ----------
+
 
 def page_about():
     st.header("What this prototype does")
@@ -265,7 +355,7 @@ def page_about():
     st.header("How the analysis works")
     st.write(
         """
-        For each utterance in a transcript, the backend computes four structural features:
+        For each utterance in a transcript, the app computes four structural features:
         """
     )
     st.markdown(
@@ -286,7 +376,7 @@ def page_about():
     st.write(
         """
         During model development, mechanistic interpretability tools such as feature importance analysis and 
-        turn‑level inspection were used to understand how these structural features influence predictions. 
+        turn‑level inspection were used offline to understand how these structural features influence predictions. 
         This helps reveal patterns like: conversations where one speaker holds many long turns tend to generate 
         higher suppression scores for shorter, infrequent contributions from others.
         """
@@ -355,14 +445,19 @@ def page_analyze():
         analyze_clicked = st.button("Analyze transcript", use_container_width=True)
 
     if load_clicked:
-        try:
-            r = requests.get(f"{API_BASE}/api/example", timeout=5)
-            if r.status_code == 200:
-                st.session_state["transcript"] = r.json().get("example", "")
-            else:
-                st.error("Could not load example from backend.")
-        except Exception:
-            st.error("Backend not reachable for example.")
+        example = (
+            "Facilitator|Thanks everyone for joining. The goal today is to discuss our new community program.\n"
+            "Alex|I think the budget is tight, and we should start small.\n"
+            "Priya|I am worried that if we start small, some neighborhoods will be left out.\n"
+            "Ravi|Maybe we can rotate the pilot locations every few months.\n"
+            "Alex|Rotations are fine, but we still do not have clarity on who decides the order.\n"
+            "Facilitator|That is a good point. Who feels their perspective has not been heard yet?\n"
+            "Sara|I have been quiet because I am new here, but I think residents should nominate pilot sites.\n"
+            "Alex|If residents nominate, we might get pressure from louder groups.\n"
+            "Priya|That is exactly why we need a clear process so quieter groups are not sidelined.\n"
+            "Facilitator|Thank you. Let us slow down and hear from people who have not spoken much yet.\n"
+        )
+        st.session_state["transcript"] = example
 
     st.text_area(
         "Transcript (one line per turn, format: Speaker|text)",
@@ -379,25 +474,14 @@ def page_analyze():
             st.warning("Please paste a transcript or load the example before analyzing.")
             return
 
-        payload = {"transcript": transcript}
-        try:
-            r = requests.post(f"{API_BASE}/api/analyze", json=payload, timeout=15)
-        except Exception:
-            st.error("Could not reach backend. Ensure it is running on port 5000.")
+        result, error = run_model_on_transcript(transcript)
+        if error is not None:
+            st.error(error)
             return
 
-        if r.status_code != 200:
-            try:
-                msg = r.json().get("error", "Analysis failed.")
-            except Exception:
-                msg = "Analysis failed."
-            st.error(msg)
-            return
-
-        data = r.json()
-        summary = data.get("summary", {})
-        turns = data.get("turns", [])
-        recs = data.get("recommendations", [])
+        summary = result["summary"]
+        turns = result["turns"]
+        recs = result["recommendations"]
 
         layout_metrics(summary)
 
@@ -466,13 +550,10 @@ def page_research():
            - Evaluate on a held‑out test split with metrics such as accuracy and AUC.  
            - Use feature importance and turn‑level inspection offline to understand which structural patterns drive predictions.  
 
-        4. **Backend deployment**  
-           - A Flask API exposes an `/api/analyze` endpoint.  
-           - For any new transcript, the backend recomputes the same four features, applies the saved scaler, and runs the trained model.  
-           - The API returns per‑turn suppression probabilities plus summary statistics and recommendations.  
-
-        5. **Frontend visualization**  
-           - This Streamlit app sends transcripts to the backend, then visualizes metrics, a suppression heatmap, and turn‑by‑turn analysis.  
+        4. **Deployment in this app**  
+           - The trained Random Forest and scaler are loaded directly inside this Streamlit app.  
+           - For any new transcript, the app recomputes the same four features, applies the saved scaler, and runs the trained model.  
+           - The app then visualizes per‑turn suppression probabilities plus summary statistics and recommendations.  
         """
     )
 
@@ -486,7 +567,7 @@ def page_research():
         | Model              | Random Forest classifier                                      | Alternative models and baselines                        |
         | Interpretability   | Structural feature importance and turn‑level inspection        | Deeper analysis of feature interactions and dynamics    |
         | Interface          | Transcript analysis, heatmap, recommendations, turn table      | Multi‑session views, comparison between conversations   |
-        | Deployment         | Transcript‑based API                                          | Integration with live transcription for facilitation    |
+        | Deployment         | Streamlit app with embedded model                             | Integration with live transcription for facilitation    |
         """
     )
 
@@ -500,6 +581,8 @@ def page_research():
         interventions during the conversation, rather than only after it ends.
         """
     )
+
+# ---------- MAIN ----------
 
 
 def main():
