@@ -5,25 +5,38 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 
+
 # ---------- MODEL LOADING (LOCAL, NO FLASK) ----------
+
 
 @st.cache_resource(show_spinner=True)
 def load_models():
     """
     Load the trained Random Forest model and scaler from the models/ folder.
-    Assumes the repository structure:
-    D:/VoiceWeave_MPDD/
-      ├── frontend.py
-      ├── models/
-      │   ├── rf_suppression_model.pkl
-      │   └── scaler.pkl
+    Works both locally and on Streamlit Cloud.
     """
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    models_dir = os.path.join(base_dir, "models")
-
-    rf_path = os.path.join(models_dir, "rf_suppression_model.pkl")
-    scaler_path = os.path.join(models_dir, "scaler.pkl")
-
+    import os
+    
+    # Try multiple path strategies
+    possible_paths = [
+        os.path.join("models", "rf_suppression_model.pkl"),  # relative to cwd
+        os.path.join(os.path.dirname(__file__), "models", "rf_suppression_model.pkl"),  # relative to script
+        "/mount/src/voiceweave/models/rf_suppression_model.pkl",  # Streamlit Cloud path
+    ]
+    
+    rf_path = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            rf_path = path
+            break
+    
+    if rf_path is None:
+        raise FileNotFoundError(
+            f"Could not find rf_suppression_model.pkl. Tried: {possible_paths}"
+        )
+    
+    scaler_path = os.path.join(os.path.dirname(rf_path), "scaler.pkl")
+    
     with open(rf_path, "rb") as f:
         rf_model = pickle.load(f)
     with open(scaler_path, "rb") as f:
@@ -32,6 +45,7 @@ def load_models():
     return rf_model, scaler
 
 
+# LOAD MODELS HERE
 rf_model, scaler = load_models()
 
 # ---------- STREAMLIT PAGE CONFIG / STYLES ----------
@@ -115,6 +129,7 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
 
 # ---------- SHARED LAYOUT HELPERS ----------
 
@@ -243,6 +258,7 @@ def render_turn_table(turns):
         )
     st.markdown("</div>", unsafe_allow_html=True)
 
+
 # ---------- CORE ANALYSIS LOGIC (NO API) ----------
 
 
@@ -332,6 +348,7 @@ def run_model_on_transcript(text: str):
     }
 
     return {"summary": summary, "turns": turns, "recommendations": recs}, None
+
 
 # ---------- PAGES ----------
 
@@ -519,7 +536,7 @@ def page_analyze():
         st.subheader("Turn‑by‑turn view")
         render_turn_table(turns)
     else:
-        st.info("Load the example or paste a transcript, then click “Analyze transcript”.")
+        st.info("Load the example or paste a transcript, then click "Analyze transcript".")
         st.write("Once you analyze, results will appear here: metrics, heatmap, and turn‑by‑turn view.")
 
 
@@ -581,6 +598,7 @@ def page_research():
         interventions during the conversation, rather than only after it ends.
         """
     )
+
 
 # ---------- MAIN ----------
 
